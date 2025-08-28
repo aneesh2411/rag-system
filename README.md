@@ -16,7 +16,7 @@ A production-ready Retrieval-Augmented Generation (RAG) system with hybrid searc
 
 Watch the system in action:
 
-https://github.com/your-username/rag-system/assets/your-user-id/RAG.mp4
+![RAG System Demo](./RAG.mp4)
 
 *This demo showcases the RAG system's document ingestion, hybrid search capabilities, and safety guardrails in action.*
 

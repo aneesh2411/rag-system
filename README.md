@@ -16,7 +16,10 @@ A production-ready Retrieval-Augmented Generation (RAG) system with hybrid searc
 
 Watch the system in action:
 
-![RAG System Demo](./RAG.mp4)
+<video width="100%" controls>
+  <source src="./RAG.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
 
 *This demo showcases the RAG system's document ingestion, hybrid search capabilities, and safety guardrails in action.*
 

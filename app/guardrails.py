@@ -10,26 +10,39 @@ class GuardrailsFilter:
     """Handles safety filtering and evidence validation."""
     
     def __init__(self):
-        # Define unsafe content patterns
+        # Define unsafe content patterns (comprehensive safety rules)
         self.unsafe_patterns = [
             # Harmful content
             r'\b(how to (?:make|create|build).{0,20}(?:bomb|explosive|weapon|poison|drug))\b',
             r'\b(?:kill|murder|assassinate|harm|hurt).{0,20}(?:someone|person|people)\b',
-            r'\b(?:suicide|self.harm|self.hurt)\b',
+            r'\b(?:suicide|self.?harm|self.?hurt|end.{0,10}life)\b',
+            r'\b(?:violence|torture|abuse|assault)\b',
             
             # Illegal activities
             r'\b(?:hack|crack|break into|steal|pirate|illegal download)\b',
-            r'\b(?:drug dealing|money laundering|fraud|scam)\b',
+            r'\b(?:drug dealing|money laundering|fraud|scam|counterfeit)\b',
+            r'\b(?:bypass|circumvent).{0,20}(?:security|firewall|protection)\b',
             
             # Hate speech patterns
-            r'\b(?:hate|discriminat\w+|racist|sexist|homophobic)\b',
+            r'\b(?:hate|discriminat\w+|racist|sexist|homophobic|xenophobic)\b',
+            r'\b(?:supremacy|genocide|ethnic.{0,10}cleansing)\b',
             
             # PII requests
             r'\b(?:ssn|social security|credit card|password|api key|private key)\b',
-            r'\b(?:personal information|private data|confidential)\b',
+            r'\b(?:personal information|private data|confidential|classified)\b',
+            r'\b(?:medical records|financial records|tax information)\b',
             
             # Inappropriate content
-            r'\b(?:adult content|nsfw|explicit|sexual)\b',
+            r'\b(?:adult content|nsfw|explicit|sexual|pornographic)\b',
+            r'\b(?:minors|children).{0,20}(?:inappropriate|sexual|explicit)\b',
+            
+            # Misinformation attempts
+            r'\b(?:conspiracy|hoax|fake news|disinformation)\b',
+            r'\b(?:medical advice|legal advice|financial advice).{0,20}(?:professional|certified)\b',
+            
+            # System manipulation
+            r'\b(?:ignore|forget|disregard).{0,20}(?:previous|instructions|rules|guidelines)\b',
+            r'\b(?:pretend|act as|role.?play).{0,20}(?:different|other|evil|harmful)\b',
         ]
         
         # Compile patterns for efficiency
@@ -241,3 +254,73 @@ class GuardrailsFilter:
             return True, "I don't know. I couldn't find sufficient information in the documents to answer your question."
         
         return False, ""
+    
+    def validate_response(self, response: str, question: str) -> tuple[bool, str]:
+        """Validate LLM response for safety and groundedness."""
+        try:
+            # Check if response is safe
+            if not self.is_safe_query(response):
+                return False, "I cannot provide that response as it may contain unsafe content."
+            
+            # Check for groundedness indicators
+            grounded_phrases = [
+                "according to the documents",
+                "based on the provided information",
+                "the document states",
+                "as mentioned in",
+                "from the documents",
+                "i don't know",
+                "i couldn't find",
+                "not enough information"
+            ]
+            
+            response_lower = response.lower()
+            has_grounding = any(phrase in response_lower for phrase in grounded_phrases)
+            
+            # Check for hallucination indicators
+            hallucination_indicators = [
+                "i know that",
+                "it is well known",
+                "generally speaking",
+                "in my experience",
+                "based on my knowledge",
+                "i believe",
+                "i think"
+            ]
+            
+            has_hallucination = any(indicator in response_lower for indicator in hallucination_indicators)
+            
+            # Warn if response might be hallucinated
+            if has_hallucination and not has_grounding:
+                logger.warning(f"Response may contain hallucinated content for query: {question[:50]}...")
+                return False, "I can only answer based on the information provided in the documents."
+            
+            # Check response length (too short might indicate poor quality)
+            if len(response.strip()) < 10:
+                return False, "I don't know. I couldn't generate a proper response based on the provided documents."
+            
+            return True, response
+            
+        except Exception as e:
+            logger.error(f"Error validating response: {e}")
+            return True, response  # Default to allowing response if validation fails
+    
+    def get_safety_stats(self) -> Dict[str, Any]:
+        """Get safety statistics."""
+        return {
+            "total_patterns": len(self.unsafe_patterns),
+            "pattern_categories": {
+                "harmful_content": 4,
+                "illegal_activities": 3, 
+                "hate_speech": 2,
+                "pii_requests": 3,
+                "inappropriate_content": 2,
+                "misinformation": 2,
+                "system_manipulation": 2
+            },
+            "evidence_thresholds": {
+                "min_chunk_length": self.min_chunk_length,
+                "min_chunks": self.min_chunks,
+                "min_relevance_score": self.min_relevance_score
+            }
+        }

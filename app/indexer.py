@@ -41,7 +41,7 @@ class ElasticsearchIndexer:
         """Deploy ELSER model if not already deployed."""
         try:
             # Check if ELSER model exists
-            model_id = ".elser_model_2"
+            model_id = ".elser_model_2_linux-x86_64"
             
             try:
                 model_info = await self.es.ml.get_trained_models(model_id=model_id)
@@ -142,21 +142,28 @@ class ElasticsearchIndexer:
     async def _generate_elser_expansions(self, texts: List[str]) -> List[Dict[str, float]]:
         """Generate ELSER text expansions."""
         try:
-            # Use inference API for ELSER
+            # Batch process multiple texts at once for better performance
+            batch_size = 20  # Process 20 chunks at a time for better performance
             expansions = []
-            for text in texts:
+            
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i:i + batch_size]
+                
+                # Prepare docs for batch inference
+                docs = [{"text_field": text} for text in batch_texts]
+                
                 response = await self.es.ml.infer_trained_model(
-                    model_id=".elser_model_2",
-                    body={
-                        "docs": [{"text_field": text}]
-                    }
+                    model_id=".elser_model_2_linux-x86_64",
+                    body={"docs": docs}
                 )
                 
                 if response and "inference_results" in response:
-                    expansion = response["inference_results"][0].get("predicted_value", {})
-                    expansions.append(expansion)
+                    for result in response["inference_results"]:
+                        expansion = result.get("predicted_value", {})
+                        expansions.append(expansion)
                 else:
-                    expansions.append({})
+                    # Add empty expansions for this batch
+                    expansions.extend([{}] * len(batch_texts))
             
             return expansions
             

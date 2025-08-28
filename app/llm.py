@@ -1,95 +1,120 @@
-"""Ollama LLM integration for answer generation."""
+"""RunPod Gemma LLM integration for answer generation."""
 
 import httpx
 import json
 import logging
+import time
 from typing import List, Dict, Any
+from enum import Enum
 
 from . import settings
 
 logger = logging.getLogger(__name__)
 
-class OllamaLLM:
-    """Handles interaction with Ollama LLM for answer generation."""
+class CircuitBreakerState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Failing, reject requests
+    HALF_OPEN = "half_open"  # Testing if service recovered
+
+class CircuitBreaker:
+    """Circuit breaker for API resilience."""
+    
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60, request_timeout: int = 30):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.request_timeout = request_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = CircuitBreakerState.CLOSED
+    
+    def can_execute(self) -> bool:
+        """Check if request can be executed."""
+        if self.state == CircuitBreakerState.CLOSED:
+            return True
+        
+        if self.state == CircuitBreakerState.OPEN:
+            # Check if recovery timeout has passed
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = CircuitBreakerState.HALF_OPEN
+                logger.info("Circuit breaker moving to HALF_OPEN state")
+                return True
+            return False
+        
+        # HALF_OPEN state - allow one test request
+        return True
+    
+    def record_success(self):
+        """Record successful request."""
+        if self.state == CircuitBreakerState.HALF_OPEN:
+            self.state = CircuitBreakerState.CLOSED
+            logger.info("Circuit breaker moving to CLOSED state - service recovered")
+        
+        self.failure_count = 0
+    
+    def record_failure(self):
+        """Record failed request."""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        
+        if self.failure_count >= self.failure_threshold:
+            if self.state != CircuitBreakerState.OPEN:
+                self.state = CircuitBreakerState.OPEN
+                logger.warning(f"Circuit breaker OPEN - {self.failure_count} failures exceeded threshold")
+        
+        if self.state == CircuitBreakerState.HALF_OPEN:
+            self.state = CircuitBreakerState.OPEN
+            logger.warning("Circuit breaker moving back to OPEN state - test request failed")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get circuit breaker statistics."""
+        return {
+            "state": self.state.value,
+            "failure_count": self.failure_count,
+            "failure_threshold": self.failure_threshold,
+            "last_failure_time": self.last_failure_time,
+            "recovery_timeout": self.recovery_timeout
+        }
+
+class RunPodLLM:
+    """Handles interaction with RunPod Gemma LLM for answer generation."""
     
     def __init__(self):
-        self.base_url = settings.OLLAMA_URL
-        self.model = settings.OLLAMA_MODEL
+        self.base_url = settings.OPENAI_BASE_URL
+        self.api_key = settings.OPENAI_API_KEY
+        self.model = settings.OPENAI_MODEL
         self.client = httpx.AsyncClient(timeout=30.0)
+        # Initialize circuit breaker (5 failures, 60s recovery, 30s timeout)
+        self.circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60, request_timeout=30)
         
     async def initialize(self):
-        """Initialize the LLM and ensure model is available."""
+        """Initialize the LLM and ensure API is accessible."""
         try:
-            # Check if Ollama is running
+            if not self.base_url or not self.api_key:
+                raise ValueError("RunPod base URL and API key are required")
+            
+            # Check if RunPod API is accessible
             if not await self.health_check():
-                raise ConnectionError("Cannot connect to Ollama")
+                raise ConnectionError("Cannot connect to RunPod API")
             
-            # Check if model is available, pull if needed
-            await self._ensure_model_available()
-            
-            logger.info(f"Ollama LLM initialized with model: {self.model}")
+            logger.info(f"RunPod LLM initialized with model: {self.model}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize Ollama LLM: {e}")
+            logger.error(f"Failed to initialize RunPod LLM: {e}")
             raise
     
     async def health_check(self) -> bool:
-        """Check if Ollama is healthy."""
+        """Check if RunPod API is healthy."""
         try:
-            response = await self.client.get(f"{self.base_url}/api/tags")
+            response = await self.client.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"}
+            )
             return response.status_code == 200
         except Exception:
             return False
     
-    async def _ensure_model_available(self):
-        """Ensure the specified model is available, pull if needed."""
-        try:
-            # Check if model exists
-            response = await self.client.get(f"{self.base_url}/api/tags")
-            if response.status_code == 200:
-                models = response.json().get("models", [])
-                model_names = [model["name"] for model in models]
-                
-                if self.model in model_names:
-                    logger.info(f"Model {self.model} is available")
-                    return
-            
-            # Pull the model
-            logger.info(f"Pulling model {self.model}...")
-            pull_response = await self.client.post(
-                f"{self.base_url}/api/pull",
-                json={"name": self.model}
-            )
-            
-            if pull_response.status_code == 200:
-                logger.info(f"Successfully pulled model {self.model}")
-            else:
-                logger.warning(f"Failed to pull model {self.model}, trying fallback")
-                # Try fallback model
-                self.model = "llama3:8b"
-                await self._pull_fallback_model()
-                
-        except Exception as e:
-            logger.error(f"Failed to ensure model availability: {e}")
-            # Use a smaller fallback
-            self.model = "llama3:8b"
-            logger.info(f"Switched to fallback model: {self.model}")
-    
-    async def _pull_fallback_model(self):
-        """Pull fallback model."""
-        try:
-            pull_response = await self.client.post(
-                f"{self.base_url}/api/pull",
-                json={"name": self.model}
-            )
-            
-            if pull_response.status_code == 200:
-                logger.info(f"Successfully pulled fallback model {self.model}")
-            else:
-                logger.error(f"Failed to pull fallback model {self.model}")
-                
-        except Exception as e:
-            logger.error(f"Failed to pull fallback model: {e}")
+
     
     def _create_prompt(self, question: str, chunks: List[Dict[str, Any]]) -> str:
         """Create prompt for the LLM with context and question."""
@@ -119,7 +144,12 @@ ANSWER:"""
         return prompt
     
     async def generate_answer(self, question: str, chunks: List[Dict[str, Any]]) -> str:
-        """Generate answer using Ollama LLM."""
+        """Generate answer using RunPod Gemma LLM with circuit breaker."""
+        # Check circuit breaker before making request
+        if not self.circuit_breaker.can_execute():
+            logger.warning("Circuit breaker OPEN - rejecting request")
+            return "I apologize, but the AI service is currently unavailable. Please try again later."
+        
         try:
             if not chunks:
                 return "I don't know. No relevant documents were found to answer your question."
@@ -127,25 +157,27 @@ ANSWER:"""
             # Create prompt
             prompt = self._create_prompt(question, chunks)
             
-            # Generate response
+            # Generate response using OpenAI-compatible chat completions API
             response = await self.client.post(
-                f"{self.base_url}/api/generate",
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
                 json={
                     "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,  # Low temperature for factual responses
-                        "top_p": 0.9,
-                        "max_tokens": 500,
-                        "stop": ["QUESTION:", "DOCUMENTS:"]
-                    }
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 500,
+                    "temperature": 0.1,  # Low temperature for factual responses
+                    "stop": ["QUESTION:", "DOCUMENTS:"]
                 }
             )
             
             if response.status_code == 200:
                 result = response.json()
-                answer = result.get("response", "").strip()
+                answer = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                 
                 if not answer:
                     return "I don't know. I couldn't generate a proper response based on the provided documents."
@@ -153,15 +185,26 @@ ANSWER:"""
                 # Basic post-processing
                 answer = self._post_process_answer(answer, chunks)
                 
+                # Record success for circuit breaker
+                self.circuit_breaker.record_success()
+                
                 logger.info(f"Generated answer of length {len(answer)}")
                 return answer
             else:
-                logger.error(f"Ollama API error: {response.status_code} - {response.text}")
+                # Record failure for circuit breaker
+                self.circuit_breaker.record_failure()
+                logger.error(f"RunPod API error: {response.status_code} - {response.text}")
                 return "I don't know. There was an error generating the response."
                 
         except Exception as e:
+            # Record failure for circuit breaker
+            self.circuit_breaker.record_failure()
             logger.error(f"Failed to generate answer: {e}")
             return "I don't know. There was an error processing your question."
+    
+    def get_circuit_breaker_stats(self) -> Dict[str, Any]:
+        """Get circuit breaker statistics."""
+        return self.circuit_breaker.get_stats()
     
     def _post_process_answer(self, answer: str, chunks: List[Dict[str, Any]]) -> str:
         """Post-process the generated answer."""
@@ -210,3 +253,6 @@ ANSWER:"""
     async def close(self):
         """Close the HTTP client."""
         await self.client.aclose()
+
+# For backward compatibility, create an alias
+OllamaLLM = RunPodLLM

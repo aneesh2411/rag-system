@@ -2,14 +2,26 @@
 
 import os
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Elasticsearch settings
 ELASTICSEARCH_URL = os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
 ELASTICSEARCH_INDEX = "rag_documents"
 
-# Ollama settings
+# LLM settings - supports both Ollama and OpenAI-compatible APIs
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3.5:3.8b-mini-instruct-q4_0")  # fallback: llama3:8b
+
+# OpenAI-compatible API settings (for RunPod, etc.)
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")  # RunPod or other OpenAI-compatible endpoint
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "google/gemma-3-1b-it")  # Default model name
+
+# LLM provider selection: "ollama" or "openai"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama" if not OPENAI_BASE_URL else "openai")
 
 # Google Drive settings
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1h6GptTW3DPCdhu7q5tY-83CXrpV8TmY_")

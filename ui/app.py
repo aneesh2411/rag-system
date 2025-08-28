@@ -25,6 +25,13 @@ def init_session_state():
         st.session_state.last_query = ""
     if "last_response" not in st.session_state:
         st.session_state.last_response = None
+    # Initialize widget states to prevent KeyError
+    if "drive_folder_id" not in st.session_state:
+        st.session_state.drive_folder_id = "1h6GptTW3DPCdhu7q5tY-83CXrpV8TmY_"
+    if "reindex" not in st.session_state:
+        st.session_state.reindex = True
+    if "top_k" not in st.session_state:
+        st.session_state.top_k = 5
 
 def check_api_health() -> bool:
     """Check if the API is healthy."""
@@ -35,9 +42,16 @@ def check_api_health() -> bool:
         return False
 
 def call_ingest_api(drive_folder_id: str, reindex: bool = True) -> Dict[str, Any]:
-    """Call the ingest API."""
+    """Call the ingest API with connection pooling and extended timeout."""
     try:
-        with httpx.Client(timeout=300.0) as client:  # 5 minute timeout for ingestion
+        # Configure connection limits for optimal performance
+        limits = httpx.Limits(
+            max_keepalive_connections=10,  # Keep connections alive
+            max_connections=20,            # Max connections
+            keepalive_expiry=30.0         # Keep alive for 30 seconds
+        )
+        
+        with httpx.Client(timeout=600.0, limits=limits, http2=True) as client:  # 10 minute timeout with HTTP/2
             response = client.post(
                 f"{API_URL}/ingest",
                 json={
@@ -55,9 +69,16 @@ def call_ingest_api(drive_folder_id: str, reindex: bool = True) -> Dict[str, Any
         return {"success": False, "error": str(e)}
 
 def call_query_api(question: str, mode: str, top_k: int) -> Dict[str, Any]:
-    """Call the query API."""
+    """Call the query API with connection pooling."""
     try:
-        with httpx.Client(timeout=30.0) as client:
+        # Configure connection limits for query API
+        limits = httpx.Limits(
+            max_keepalive_connections=5,   # Keep connections alive
+            max_connections=10,            # Max connections
+            keepalive_expiry=30.0         # Keep alive for 30 seconds
+        )
+        
+        with httpx.Client(timeout=30.0, limits=limits, http2=True) as client:
             response = client.post(
                 f"{API_URL}/query",
                 json={
@@ -93,24 +114,49 @@ def render_sidebar():
     
     drive_folder_id = st.sidebar.text_input(
         "Google Drive Folder ID",
-        value="1h6GptTW3DPCdhu7q5tY-83CXrpV8TmY_",
+        value=st.session_state.drive_folder_id,
+        key="drive_folder_id_input",
         help="ID of the Google Drive folder containing PDFs"
     )
     
-    reindex = st.sidebar.checkbox("Reindex all documents", value=True)
+    reindex = st.sidebar.checkbox(
+        "Reindex all documents", 
+        value=st.session_state.reindex,
+        key="reindex_checkbox"
+    )
     
     if st.sidebar.button("🔄 Start Ingestion", type="primary"):
-        with st.spinner("Ingesting documents..."):
+        # Create progress bar
+        progress_bar = st.sidebar.progress(0)
+        status_text = st.sidebar.empty()
+        
+        status_text.text("🚀 Starting ingestion...")
+        progress_bar.progress(10)
+        
+        with st.spinner("Processing documents with OCR and ELSER..."):
             result = call_ingest_api(drive_folder_id, reindex)
+            
+            progress_bar.progress(90)
+            status_text.text("📊 Finalizing indexing...")
             
             if result["success"]:
                 data = result["data"]
+                progress_bar.progress(100)
+                status_text.text("✅ Ingestion completed!")
                 st.sidebar.success(
-                    f"✅ Ingested {data['documents_indexed']} documents "
-                    f"({data['chunks']} chunks)"
+                    f"✅ Successfully indexed {data['documents_indexed']} documents "
+                    f"with {data['chunks']} chunks"
                 )
             else:
+                progress_bar.progress(0)
+                status_text.text("❌ Ingestion failed")
                 st.sidebar.error(f"❌ Ingestion failed: {result['error']}")
+        
+        # Clear progress indicators after a delay
+        import time
+        time.sleep(2)
+        progress_bar.empty()
+        status_text.empty()
     
     st.sidebar.divider()
     
@@ -121,6 +167,7 @@ def render_sidebar():
         "Retrieval Mode",
         options=["hybrid", "elser"],
         index=0,
+        key="mode_select",
         help="Choose between ELSER-only or Hybrid (ELSER + BM25 + Dense) retrieval"
     )
     
@@ -128,7 +175,8 @@ def render_sidebar():
         "Number of Results",
         min_value=1,
         max_value=10,
-        value=5,
+        value=st.session_state.top_k,
+        key="top_k_slider",
         help="Number of document chunks to retrieve"
     )
     

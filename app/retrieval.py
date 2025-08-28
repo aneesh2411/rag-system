@@ -1,15 +1,99 @@
 """Hybrid retrieval with ELSER, BM25, and dense vectors using RRF."""
 
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional
 from elasticsearch import AsyncElasticsearch
 from sentence_transformers import SentenceTransformer
 import logging
 import asyncio
 from collections import defaultdict
+import hashlib
+import time
 
 from . import settings
 
 logger = logging.getLogger(__name__)
+
+class EmbeddingCache:
+    """LRU cache for embeddings with TTL (Time To Live)."""
+    
+    def __init__(self, max_size: int = 1000, ttl_seconds: int = 3600):
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self.cache = {}
+        self.access_times = {}
+        self.creation_times = {}
+    
+    def _hash_text(self, text: str) -> str:
+        """Create a hash key for the text."""
+        return hashlib.md5(text.encode()).hexdigest()
+    
+    def _is_expired(self, key: str) -> bool:
+        """Check if cache entry is expired."""
+        if key not in self.creation_times:
+            return True
+        return time.time() - self.creation_times[key] > self.ttl_seconds
+    
+    def _evict_lru(self):
+        """Evict least recently used item."""
+        if not self.access_times:
+            return
+        
+        lru_key = min(self.access_times.keys(), key=lambda k: self.access_times[k])
+        self._remove_key(lru_key)
+    
+    def _remove_key(self, key: str):
+        """Remove key from all tracking dictionaries."""
+        self.cache.pop(key, None)
+        self.access_times.pop(key, None)
+        self.creation_times.pop(key, None)
+    
+    def get(self, text: str) -> Optional[List[float]]:
+        """Get embedding from cache."""
+        key = self._hash_text(text)
+        
+        # Check if exists and not expired
+        if key in self.cache and not self._is_expired(key):
+            self.access_times[key] = time.time()
+            logger.debug(f"Cache hit for text hash: {key[:8]}...")
+            return self.cache[key]
+        
+        # Remove if expired
+        if key in self.cache:
+            self._remove_key(key)
+        
+        return None
+    
+    def put(self, text: str, embedding: List[float]):
+        """Store embedding in cache."""
+        key = self._hash_text(text)
+        
+        # Evict if at capacity
+        while len(self.cache) >= self.max_size:
+            self._evict_lru()
+        
+        # Store new embedding
+        current_time = time.time()
+        self.cache[key] = embedding
+        self.access_times[key] = current_time
+        self.creation_times[key] = current_time
+        
+        logger.debug(f"Cached embedding for text hash: {key[:8]}...")
+    
+    def clear(self):
+        """Clear all cache entries."""
+        self.cache.clear()
+        self.access_times.clear()
+        self.creation_times.clear()
+        logger.info("Embedding cache cleared")
+    
+    def stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        return {
+            "size": len(self.cache),
+            "max_size": self.max_size,
+            "ttl_seconds": self.ttl_seconds,
+            "hit_rate": getattr(self, '_hits', 0) / max(getattr(self, '_requests', 1), 1)
+        }
 
 class HybridRetriever:
     """Handles hybrid retrieval with ELSER, BM25, and dense vectors."""
@@ -18,6 +102,10 @@ class HybridRetriever:
         self.es = AsyncElasticsearch([settings.ELASTICSEARCH_URL])
         self.embedding_model = None
         self.index_name = settings.ELASTICSEARCH_INDEX
+        # Initialize embedding cache (1000 embeddings, 1 hour TTL)
+        self.embedding_cache = EmbeddingCache(max_size=1000, ttl_seconds=3600)
+        self._cache_hits = 0
+        self._cache_requests = 0
         
     async def initialize(self):
         """Initialize the retriever and embedding model."""
@@ -58,12 +146,31 @@ class HybridRetriever:
             raise
     
     def _generate_query_embedding(self, query: str) -> List[float]:
-        """Generate embedding for query."""
+        """Generate embedding for query with caching."""
         if not self.embedding_model:
             raise ValueError("Embedding model not initialized")
         
+        # Track cache requests
+        self._cache_requests += 1
+        
+        # Try to get from cache first
+        cached_embedding = self.embedding_cache.get(query)
+        if cached_embedding is not None:
+            self._cache_hits += 1
+            logger.debug(f"Embedding cache hit for query: {query[:50]}...")
+            return cached_embedding
+        
+        # Generate new embedding
+        start_time = time.time()
         embedding = self.embedding_model.encode([query], convert_to_tensor=False)
-        return embedding[0].tolist()
+        embedding_list = embedding[0].tolist()
+        generation_time = time.time() - start_time
+        
+        # Cache the result
+        self.embedding_cache.put(query, embedding_list)
+        
+        logger.debug(f"Generated embedding in {generation_time:.3f}s for query: {query[:50]}...")
+        return embedding_list
     
     async def _search_elser(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         """Search using ELSER text expansion."""
@@ -73,7 +180,7 @@ class HybridRetriever:
                 "query": {
                     "text_expansion": {
                         "text_expansion": {
-                            "model_id": ".elser_model_2",
+                            "model_id": ".elser_model_2_linux-x86_64",
                             "model_text": query
                         }
                     }
@@ -144,13 +251,11 @@ class HybridRetriever:
             query_vector = self._generate_query_embedding(query)
             
             search_body = {
-                "query": {
-                    "knn": {
-                        "field": "vector",
-                        "query_vector": query_vector,
-                        "k": top_k,
-                        "num_candidates": top_k * 2
-                    }
+                "knn": {
+                    "field": "vector",
+                    "query_vector": query_vector,
+                    "k": top_k,
+                    "num_candidates": top_k * 2
                 },
                 "size": top_k,
                 "_source": ["content", "filename", "drive_url", "chunk_id"]
@@ -214,6 +319,23 @@ class HybridRetriever:
             fused_results.append(doc)
         
         return fused_results
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get embedding cache statistics."""
+        cache_stats = self.embedding_cache.stats()
+        cache_stats.update({
+            "requests": self._cache_requests,
+            "hits": self._cache_hits,
+            "hit_rate": self._cache_hits / max(self._cache_requests, 1)
+        })
+        return cache_stats
+    
+    def clear_cache(self):
+        """Clear embedding cache."""
+        self.embedding_cache.clear()
+        self._cache_hits = 0
+        self._cache_requests = 0
+        logger.info("Embedding cache cleared and stats reset")
     
     async def search(self, 
                     query: str, 

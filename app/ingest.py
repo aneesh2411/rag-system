@@ -12,11 +12,8 @@ import tiktoken
 import PyPDF2
 import fitz  # pymupdf
 import ocrmypdf
-from PIL import Image
-import pytesseract
 
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 import httpx
 
 from .indexer import ElasticsearchIndexer
@@ -253,13 +250,24 @@ class PDFIngester:
             
             # Use ocrmypdf to add OCR layer
             ocr_path = f"/tmp/ocr_{filename}"
-            ocrmypdf.ocr(
-                temp_path,
-                ocr_path,
-                language=settings.OCR_LANGUAGE,
-                force_ocr=True,
-                skip_text=True
-            )
+            try:
+                ocrmypdf.ocr(
+                    temp_path,
+                    ocr_path,
+                    language=settings.OCR_LANGUAGE,
+                    force_ocr=True,
+                    deskew=True,
+                    remove_background=False,
+                    optimize=0
+                )
+            except Exception as ocr_error:
+                logger.error(f"OCR processing failed for {filename}: {ocr_error}")
+                # Try with minimal parameters
+                ocrmypdf.ocr(
+                    temp_path,
+                    ocr_path,
+                    language=settings.OCR_LANGUAGE
+                )
             
             # Extract text from OCR'd PDF
             with open(ocr_path, 'rb') as f:
@@ -390,7 +398,7 @@ class PDFIngester:
             
             total_documents_processed = 0
             total_chunks = 0
-            batch_size = 2  # Process 2 files at a time to avoid memory issues
+            batch_size = 4  # Process 4 files at a time for better performance
             
             # Try to get files from Drive
             drive_files = await self._list_drive_files(folder_id)
